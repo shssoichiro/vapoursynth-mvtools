@@ -63,6 +63,43 @@ unsigned int luma_sse2(const uint8_t *pSrc, intptr_t nSrcPitch) {
     return (unsigned)_mm_cvtsi128_si32(sum);
 }
 
+template <unsigned width, unsigned height>
+unsigned int luma_sse2_16b(const uint8_t *pSrc, intptr_t nSrcPitch) {
+    __m128i sum32 = zeroes;
+    const __m128i ones = _mm_set1_epi16(1);
+    
+    for (unsigned y = 0; y < height; y++) {
+        const uint16_t *pSrc16 = (const uint16_t *)pSrc;
+        
+        if (width == 4) {
+            // Special case for width = 4: load 4 x 16-bit values (64 bits)
+            __m128i src = _mm_loadl_epi64((const __m128i *)pSrc16);
+            // Zero the upper 64 bits
+            src = _mm_unpacklo_epi64(src, zeroes);
+            // Sum adjacent pairs into 32-bit values using multiply-add
+            __m128i pairsum = _mm_madd_epi16(src, ones);
+            sum32 = _mm_add_epi32(sum32, pairsum);
+        } else {
+            // For width >= 8: process in chunks of 8 x 16-bit values
+            for (unsigned x = 0; x < width; x += 8) {
+                __m128i src = _mm_loadu_si128((const __m128i *)&pSrc16[x]);
+                // Sum adjacent pairs into 32-bit values
+                __m128i pairsum = _mm_madd_epi16(src, ones);
+                sum32 = _mm_add_epi32(sum32, pairsum);
+            }
+        }
+        
+        pSrc += nSrcPitch;
+    }
+    
+    // Horizontal sum of 4 x 32-bit values
+    sum32 = _mm_add_epi32(sum32, _mm_srli_si128(sum32, 8));
+    sum32 = _mm_add_epi32(sum32, _mm_srli_si128(sum32, 4));
+    
+    return (unsigned)_mm_cvtsi128_si32(sum32);
+}
+
+
 
 #undef zeroes
 
@@ -75,7 +112,8 @@ unsigned int luma_sse2(const uint8_t *pSrc, intptr_t nSrcPitch) {
 
 #if defined(MVTOOLS_X86) || defined(MVTOOLS_ARM)
 #define LUMA_SSE2(width, height) \
-    { KEY(width, height, 8, SSE2), luma_sse2<width, height> },
+    { KEY(width, height, 8, SSE2), luma_sse2<width, height> }, \
+    { KEY(width, height, 16, SSE2), luma_sse2_16b<width, height> },
 #else
 #define LUMA_SSE2(width, height)
 #endif

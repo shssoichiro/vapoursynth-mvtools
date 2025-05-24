@@ -65,40 +65,109 @@ unsigned int luma_sse2(const uint8_t *pSrc, intptr_t nSrcPitch) {
 
 template <unsigned width, unsigned height>
 unsigned int luma_sse2_16b(const uint8_t *pSrc, intptr_t nSrcPitch) {
-    __m128i sum32 = zeroes;
-    const __m128i ones = _mm_set1_epi16(1);
-    
-    for (unsigned y = 0; y < height; y++) {
-        const uint16_t *pSrc16 = (const uint16_t *)pSrc;
-        
-        if (width == 4) {
-            // Special case for width = 4: load 4 x 16-bit values (64 bits)
-            __m128i src = _mm_loadl_epi64((const __m128i *)pSrc16);
-            // Zero the upper 64 bits
-            src = _mm_unpacklo_epi64(src, zeroes);
-            // Sum adjacent pairs into 32-bit values using multiply-add
-            __m128i pairsum = _mm_madd_epi16(src, ones);
-            sum32 = _mm_add_epi32(sum32, pairsum);
-        } else {
-            // For width >= 8: process in chunks of 8 x 16-bit values
-            for (unsigned x = 0; x < width; x += 8) {
-                __m128i src = _mm_loadu_si128((const __m128i *)&pSrc16[x]);
-                // Sum adjacent pairs into 32-bit values
-                __m128i pairsum = _mm_madd_epi16(src, ones);
-                sum32 = _mm_add_epi32(sum32, pairsum);
-            }
-        }
-        
-        pSrc += nSrcPitch;
-    }
-    
-    // Horizontal sum of 4 x 32-bit values
-    sum32 = _mm_add_epi32(sum32, _mm_srli_si128(sum32, 8));
-    sum32 = _mm_add_epi32(sum32, _mm_srli_si128(sum32, 4));
-    
-    return (unsigned)_mm_cvtsi128_si32(sum32);
-}
+    const uint16_t *pSrc16 = (const uint16_t *)pSrc;
 
+    if (width == 4 && height == 4) {
+        // Special case: 4x4 - process all at once
+        __m128i row0 = _mm_loadl_epi64((const __m128i *)pSrc16);
+        pSrc16 = (const uint16_t *)((const uint8_t *)pSrc16 + nSrcPitch);
+        __m128i row1 = _mm_loadl_epi64((const __m128i *)pSrc16);
+        pSrc16 = (const uint16_t *)((const uint8_t *)pSrc16 + nSrcPitch);
+        __m128i row2 = _mm_loadl_epi64((const __m128i *)pSrc16);
+        pSrc16 = (const uint16_t *)((const uint8_t *)pSrc16 + nSrcPitch);
+        __m128i row3 = _mm_loadl_epi64((const __m128i *)pSrc16);
+
+        // Unpack each row to 32-bit (zero-extend)
+        row0 = _mm_unpacklo_epi16(row0, zeroes);
+        row1 = _mm_unpacklo_epi16(row1, zeroes);
+        row2 = _mm_unpacklo_epi16(row2, zeroes);
+        row3 = _mm_unpacklo_epi16(row3, zeroes);
+
+        // Add all rows
+        __m128i sum = _mm_add_epi32(_mm_add_epi32(row0, row1),
+                                    _mm_add_epi32(row2, row3));
+
+        // Horizontal sum
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+        return (unsigned)_mm_cvtsi128_si32(sum);
+    }
+    else if (width <= 8) {
+        // For width 8 or less, use single accumulator with unpacking
+        __m128i sum = zeroes;
+
+        for (unsigned y = 0; y < height; y++) {
+            __m128i src = _mm_loadu_si128((const __m128i *)pSrc16);
+
+            // Unpack to 32-bit and accumulate
+            __m128i lo = _mm_unpacklo_epi16(src, zeroes);
+            __m128i hi = _mm_unpackhi_epi16(src, zeroes);
+            sum = _mm_add_epi32(sum, _mm_add_epi32(lo, hi));
+
+            pSrc16 = (const uint16_t *)((const uint8_t *)pSrc16 + nSrcPitch);
+        }
+
+        // Horizontal sum
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+        return (unsigned)_mm_cvtsi128_si32(sum);
+    }
+    else {
+        // For larger widths, use multiple accumulators to reduce dependency chains
+        __m128i sum0 = zeroes;
+        __m128i sum1 = zeroes;
+        __m128i sum2 = zeroes;
+        __m128i sum3 = zeroes;
+
+        for (unsigned y = 0; y < height; y++) {
+            const uint16_t *row = pSrc16;
+
+            // Process width in chunks of 32 pixels (4 x 8)
+            for (unsigned x = 0; x < width; x += 32) {
+                __m128i src0 = _mm_loadu_si128((const __m128i *)&row[x]);
+                __m128i src1 = _mm_loadu_si128((const __m128i *)&row[x + 8]);
+
+                // Unpack and accumulate to different accumulators
+                __m128i lo0 = _mm_unpacklo_epi16(src0, zeroes);
+                __m128i hi0 = _mm_unpackhi_epi16(src0, zeroes);
+                sum0 = _mm_add_epi32(sum0, lo0);
+                sum1 = _mm_add_epi32(sum1, hi0);
+
+                __m128i lo1 = _mm_unpacklo_epi16(src1, zeroes);
+                __m128i hi1 = _mm_unpackhi_epi16(src1, zeroes);
+                sum2 = _mm_add_epi32(sum2, lo1);
+                sum3 = _mm_add_epi32(sum3, hi1);
+
+                if (x + 16 < width) {
+                    __m128i src2 = _mm_loadu_si128((const __m128i *)&row[x + 16]);
+                    __m128i src3 = _mm_loadu_si128((const __m128i *)&row[x + 24]);
+
+                    __m128i lo2 = _mm_unpacklo_epi16(src2, zeroes);
+                    __m128i hi2 = _mm_unpackhi_epi16(src2, zeroes);
+                    sum0 = _mm_add_epi32(sum0, lo2);
+                    sum1 = _mm_add_epi32(sum1, hi2);
+
+                    __m128i lo3 = _mm_unpacklo_epi16(src3, zeroes);
+                    __m128i hi3 = _mm_unpackhi_epi16(src3, zeroes);
+                    sum2 = _mm_add_epi32(sum2, lo3);
+                    sum3 = _mm_add_epi32(sum3, hi3);
+                }
+            }
+
+            pSrc16 = (const uint16_t *)((const uint8_t *)pSrc16 + nSrcPitch);
+        }
+
+        // Combine all accumulators
+        sum0 = _mm_add_epi32(sum0, sum1);
+        sum2 = _mm_add_epi32(sum2, sum3);
+        sum0 = _mm_add_epi32(sum0, sum2);
+
+        // Horizontal sum
+        sum0 = _mm_add_epi32(sum0, _mm_srli_si128(sum0, 8));
+        sum0 = _mm_add_epi32(sum0, _mm_srli_si128(sum0, 4));
+        return (unsigned)_mm_cvtsi128_si32(sum0);
+    }
+}
 
 
 #undef zeroes
